@@ -2,6 +2,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import store
 from data import TF, get_pair
 from zones import analyze
 
@@ -17,8 +18,8 @@ with st.sidebar:
 
 @st.cache_data(ttl=15, show_spinner=False)
 def load(sym, tf):
-    df, htf = get_pair(sym, tf)
-    return df, htf, analyze(df, htf)
+    df, htf, src = get_pair(sym, tf)
+    return df, htf, analyze(df, htf), src
 
 
 def draw(sym, df, zones):
@@ -43,11 +44,11 @@ def live():
     frames, tables = {}, []
     for s in symbols:
         try:
-            df, _, z = load(s, tf)
+            df, _, z, src = load(s, tf)
         except Exception as e:
             st.warning(f"{s}: {e}")
             continue
-        frames[s] = (df, z)
+        frames[s] = (df, z, src)
         z = z[z.stars >= min_stars]
         if len(z):
             tables.append(z.assign(symbole=s, prix=round(float(df.close.iloc[-1]), 4)))
@@ -57,8 +58,35 @@ def live():
         st.dataframe(t.sort_values(["stars", "in_zone"], ascending=False), use_container_width=True, hide_index=True)
     sel = st.selectbox("Graphique", list(frames))
     if sel:
-        df, z = frames[sel]
+        df, z, src = frames[sel]
+        st.caption(f"Source des données : {src}")
         draw(sel, df, z[z.stars >= max(1, min_stars - 1)])
 
 
-live()
+def stats():
+    if not store.enabled():
+        st.info("Supabase non configuré (secrets SUPABASE_URL et SUPABASE_KEY).")
+        return
+    d = pd.DataFrame(store.all_zones())
+    if d.empty:
+        st.info("Aucune zone enregistrée pour l'instant : le scanner GitHub Actions doit tourner quelques heures.")
+        return
+    g = d.groupby("stars").agg(
+        zones=("id", "count"),
+        gagnants=("outcome", lambda s: int((s == "win").sum())),
+        perdants=("outcome", lambda s: int((s == "loss").sum())),
+        en_cours=("outcome", lambda s: int(s.isin(["pending", "open"]).sum())),
+    )
+    done = g.gagnants + g.perdants
+    g["taux_%"] = (100 * g.gagnants / done.where(done > 0)).round(1)
+    st.dataframe(g, use_container_width=True)
+    st.bar_chart(g["taux_%"])
+    st.caption("Gagnant = le prix touche la zone puis atteint +2R (R = hauteur de la zone) avant de casser son bord opposé. "
+               "Seuil de rentabilité : 33 % (hors frais). Peu de zones résolues = chiffres peu fiables.")
+
+
+tab_live, tab_stats = st.tabs(["Live", "Stats"])
+with tab_live:
+    live()
+with tab_stats:
+    stats()

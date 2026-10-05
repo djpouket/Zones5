@@ -64,7 +64,7 @@ def _detect_bull(df: pd.DataFrame, n: int = 3, k: float = 1.2) -> list[dict]:
                 break
         ote = (leg_hi - OTE[1] * rng, leg_hi - OTE[0] * rng)
         hit = lambda z: z is not None and z[0] <= ote[1] and z[1] >= ote[0]
-        out.append(dict(j=j, ob=(ob_bot, ob_top), fvg=fvg, ote=ote,
+        out.append(dict(j=j, i=i, ob=(ob_bot, ob_top), fvg=fvg, ote=ote,
                         ote_hit=hit((ob_bot, ob_top)) or hit(fvg),
                         fresh=not (l[i + 1:] <= ob_top).any(),
                         disp=(c[i] - o[i]) / ref))
@@ -85,10 +85,33 @@ def analyze(df: pd.DataFrame, htf: pd.DataFrame | None = None, n: int = 3, k: fl
             if z["fresh"]: crit.append("Fraîche")
             if bias == s: crit.append("HTF")
             rows.append(dict(side=side, bottom=ob[0], top=ob[1], fvg=fvg, ote=ote, stars=len(crit),
-                             criteres=" · ".join(crit), t0=df.index[z["j"]],
+                             criteres=" · ".join(crit), t0=df.index[z["j"]], t_imp=df.index[z["i"]],
                              dist_pct=round((last - (ob[1] if side == "bull" else ob[0])) / last * 100, 2),
                              in_zone=ob[0] <= last <= ob[1]))
-    cols = ["side", "bottom", "top", "fvg", "ote", "stars", "criteres", "t0", "dist_pct", "in_zone"]
+    cols = ["side", "bottom", "top", "fvg", "ote", "stars", "criteres", "t0", "t_imp", "dist_pct", "in_zone"]
     res = pd.DataFrame(rows, columns=cols)
     return res.sort_values(["stars", "dist_pct"], key=lambda x: x if x.name == "stars" else x.abs(),
                            ascending=[False, True]).reset_index(drop=True)
+
+
+def outcome(df: pd.DataFrame, side: str, bottom: float, top: float, t_imp) -> str:
+    """Résultat d'une zone : pending (jamais touchée), open (touchée, en cours), win (+2R), loss (stop).
+    Entrée au bord de la zone, stop au bord opposé, cible = 2R (R = hauteur de la zone).
+    Si stop et cible sont dans la même bougie, on compte le stop (hypothèse prudente)."""
+    d = df[df.index > t_imp]
+    if side == "bear":
+        lo, hi = -d["high"].to_numpy(float), -d["low"].to_numpy(float)
+        bottom, top = -top, -bottom
+    else:
+        lo, hi = d["low"].to_numpy(float), d["high"].to_numpy(float)
+    target = top + 2 * (top - bottom)
+    touched = False
+    for l, h in zip(lo, hi):
+        if not touched and l <= top:
+            touched = True
+        if touched:
+            if l <= bottom:
+                return "loss"
+            if h >= target:
+                return "win"
+    return "open" if touched else "pending"

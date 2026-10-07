@@ -9,7 +9,7 @@ def _cfg():
     if not (url and key):
         return None
     headers = {"apikey": key, "Content-Type": "application/json"}
-    if key.startswith("eyJ"):            # ancienne clé service_role (JWT) ; les clés sb_secret_... vont dans apikey seul
+    if key.startswith("eyJ"):
         headers["Authorization"] = f"Bearer {key}"
     return url.rstrip("/") + "/rest/v1", headers
 
@@ -28,6 +28,7 @@ def _req(method, params=None, json=None, prefer=None):
 
 
 def _in(values):
+    values = [str(v) for v in values]
     return "in.(" + ",".join(f'"{v}"' for v in values) + ")"
 
 

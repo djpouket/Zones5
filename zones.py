@@ -47,11 +47,11 @@ def _detect_bull(df: pd.DataFrame, n: int = 3, k: float = 1.2) -> list[dict]:
         if j is None or j in seen:
             continue
         prev = [p for idx, p in swing_highs if idx + n <= j]
-        if not prev or c[i] <= prev[-1]:          # pas de BOS
+        if not prev or c[i] <= prev[-1]:
             continue
         seen.add(j)
         ob_bot, ob_top = l[j], h[j]
-        if (c[i + 1:] < ob_bot).any():            # OB invalidé
+        if (c[i + 1:] < ob_bot).any():
             continue
         leg_hi = h[j:min(i + 3, N)].max()
         rng = leg_hi - ob_bot
@@ -62,12 +62,16 @@ def _detect_bull(df: pd.DataFrame, n: int = 3, k: float = 1.2) -> list[dict]:
             if l[kk] > h[kk - 2] and h[kk - 2] <= ob_top + 0.25 * ref:
                 fvg = (h[kk - 2], l[kk])
                 break
+
         ote = (leg_hi - OTE[1] * rng, leg_hi - OTE[0] * rng)
         hit = lambda z: z is not None and z[0] <= ote[1] and z[1] >= ote[0]
-        out.append(dict(j=j, i=i, ob=(ob_bot, ob_top), fvg=fvg, ote=ote,
-                        ote_hit=hit((ob_bot, ob_top)) or hit(fvg),
-                        fresh=not (l[i + 1:] <= ob_top).any(),
-                        disp=(c[i] - o[i]) / ref))
+
+        out.append(dict(
+            j=j, i=i, ob=(ob_bot, ob_top), fvg=fvg, ote=ote,
+            ote_hit=hit((ob_bot, ob_top)) or (fvg is not None and hit(fvg)),
+            fresh=not (l[j + 1:i + 1] <= ob_top).any(),
+            disp=(c[i] - o[i]) / ref
+        ))
     return out
 
 
@@ -84,10 +88,19 @@ def analyze(df: pd.DataFrame, htf: pd.DataFrame | None = None, n: int = 3, k: fl
             if z["ote_hit"]: crit.append("OTE")
             if z["fresh"]: crit.append("Fraîche")
             if bias == s: crit.append("HTF")
-            rows.append(dict(side=side, bottom=ob[0], top=ob[1], fvg=fvg, ote=ote, stars=len(crit),
-                             criteres=" · ".join(crit), t0=df.index[z["j"]], t_imp=df.index[z["i"]],
-                             dist_pct=round((last - (ob[1] if side == "bull" else ob[0])) / last * 100, 2),
-                             in_zone=ob[0] <= last <= ob[1]))
+            rows.append(dict(
+                side=side,
+                bottom=ob[0],
+                top=ob[1],
+                fvg=fvg,
+                ote=ote,
+                stars=len(crit),
+                criteres=" · ".join(crit),
+                t0=df.index[z["j"]],
+                t_imp=df.index[z["i"]],
+                dist_pct=round((last - (ob[1] if side == "bull" else ob[0])) / last * 100, 2),
+                in_zone=ob[0] <= last <= ob[1]
+            ))
     cols = ["side", "bottom", "top", "fvg", "ote", "stars", "criteres", "t0", "t_imp", "dist_pct", "in_zone"]
     res = pd.DataFrame(rows, columns=cols)
     return res.sort_values(["stars", "dist_pct"], key=lambda x: x if x.name == "stars" else x.abs(),
@@ -104,14 +117,22 @@ def outcome(df: pd.DataFrame, side: str, bottom: float, top: float, t_imp) -> st
         bottom, top = -top, -bottom
     else:
         lo, hi = d["low"].to_numpy(float), d["high"].to_numpy(float)
-    target = top + 2 * (top - bottom)
+
+    r = top - bottom
+    target = top + 2 * r if side == "bull" else bottom - 2 * r
     touched = False
     for l, h in zip(lo, hi):
         if not touched and l <= top:
             touched = True
         if touched:
-            if l <= bottom:
-                return "loss"
-            if h >= target:
-                return "win"
+            if side == "bull":
+                if l <= bottom:
+                    return "loss"
+                if h >= target:
+                    return "win"
+            else:
+                if h >= top:
+                    return "loss"
+                if l <= target:
+                    return "win"
     return "open" if touched else "pending"

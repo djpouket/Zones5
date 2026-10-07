@@ -9,7 +9,8 @@ import store
 from data import get_pair
 from zones import analyze, outcome
 
-SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "NVDA,AMD,TSLA,GC=F,BTC-USD").split(",") if s.strip()]
+DEFAULT_SYMBOLS = "EURUSD=X,XAUUSD=X,XAGUSD=X,^GDAXI,^STOXX50E,GBPUSD=X,USDJPY=X,USDCHF=X,AUDUSD=X,NZDUSD=X"
+SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", DEFAULT_SYMBOLS).split(",") if s.strip()]
 TF = os.getenv("TF", "5m")
 ALERT_MIN = int(os.getenv("ALERT_MIN", "5"))
 STORE_MIN = int(os.getenv("STORE_MIN", "3"))

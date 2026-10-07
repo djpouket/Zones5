@@ -71,7 +71,11 @@ def stats():
     if not store.enabled():
         st.info("Supabase non configuré (secrets SUPABASE_URL et SUPABASE_KEY).")
         return
-    d = pd.DataFrame(store.all_zones())
+    try:
+        d = pd.DataFrame(store.all_zones())
+    except Exception as e:
+        st.warning(f"Erreur Supabase : {e}")
+        return
     if d.empty:
         st.info("Aucune zone enregistrée pour l'instant : le scanner GitHub Actions doit tourner quelques heures.")
         return
@@ -94,3 +98,4 @@ with tab_live:
     live()
 with tab_stats:
     stats()
+

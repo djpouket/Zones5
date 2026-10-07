@@ -18,7 +18,7 @@ DAYS = {"1d": 2, "5d": 7, "10d": 14, "1mo": 31, "3mo": 93, "60d": 60, "1y": 365}
 
 
 def _is_stock(s: str) -> bool:
-    return s.replace(".", "").isalpha()          # NVDA oui ; GC=F, BTC-USD non
+    return s.replace(".", "").isalpha()  # NVDA oui ; GC=F, BTC-USD non
 
 
 def _alpaca(symbol: str, interval: str, period: str) -> pd.DataFrame:
@@ -36,7 +36,10 @@ def _alpaca(symbol: str, interval: str, period: str) -> pd.DataFrame:
         raise ValueError("Alpaca : aucune barre")
     df = pd.DataFrame(bars).rename(columns={"t": "time", "o": "open", "h": "high", "l": "low", "c": "close"})
     df["time"] = pd.to_datetime(df["time"])
-    return df.set_index("time")[["open", "high", "low", "close"]].sort_index().tz_convert("Europe/Paris")
+    df = df.set_index("time")[["open", "high", "low", "close"]].sort_index()
+    if df.index.tz is None:
+        df = df.tz_localize("UTC")
+    return df.tz_convert("Europe/Paris")
 
 
 def _yf(symbol: str, interval: str, period: str) -> pd.DataFrame:

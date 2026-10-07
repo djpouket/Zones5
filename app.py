@@ -27,14 +27,16 @@ def draw(sym, df, zones):
     fig = go.Figure(go.Candlestick(x=d.index, open=d.open, high=d.high, low=d.low, close=d.close, name=sym))
     for _, z in zones[zones.t0 >= d.index[0]].iterrows():
         col = "0,160,90" if z.side == "bull" else "210,50,50"
-        fig.add_shape(type="rect", x0=z.t0, x1=d.index[-1], y0=z.bottom, y1=z.top,
+        bottom, top = min(z.bottom, z.top), max(z.bottom, z.top)
+        fig.add_shape(type="rect", x0=z.t0, x1=d.index[-1], y0=bottom, y1=top,
                       fillcolor=f"rgba({col},0.25)", line=dict(color=f"rgb({col})", width=1))
         if z.fvg:
-            fig.add_shape(type="rect", x0=z.t0, x1=d.index[-1], y0=z.fvg[0], y1=z.fvg[1],
+            fvg_bottom, fvg_top = min(z.fvg), max(z.fvg)
+            fig.add_shape(type="rect", x0=z.t0, x1=d.index[-1], y0=fvg_bottom, y1=fvg_top,
                           fillcolor="rgba(120,120,255,0.18)", line_width=0)
         for y in z.ote:
             fig.add_shape(type="line", x0=z.t0, x1=d.index[-1], y0=y, y1=y, line=dict(color="gold", dash="dot", width=1))
-        fig.add_annotation(x=z.t0, y=z.top, text="★" * z.stars, showarrow=False, yshift=10)
+        fig.add_annotation(x=z.t0, y=top, text="★" * z.stars, showarrow=False, yshift=10)
     fig.update_layout(xaxis_rangeslider_visible=False, height=520, margin=dict(l=0, r=0, t=10, b=0))
     st.plotly_chart(fig, use_container_width=True)
 

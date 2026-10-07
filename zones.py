@@ -1,138 +1,94 @@
-"""Moteur SMC : Order Blocks + Imbalance (FVG) + OTE -> note de 1 à 5 étoiles.
+"""Données de marché : Alpaca (actions US, temps réel IEX) si clés présentes, sinon yfinance."""
+import os
+import re
+from datetime import datetime, timedelta, timezone
 
-Critères (1 point chacun) :
-  1. OB valide : bougie opposée avant un déplacement fort (>= k*ATR) qui casse la structure (BOS)
-  2. Imbalance : un FVG créé par l'impulsion, collé à l'OB
-  3. OTE : l'OB ou le FVG chevauche la zone 62%-79% de la jambe d'impulsion
-  4. Fraîche : prix jamais revenu toucher l'OB depuis sa formation (et non invalidée)
-  5. Biais HTF aligné (EMA50 + pente sur la unité de temps supérieure)
-"""
-import numpy as np
 import pandas as pd
+import requests
+import yfinance as yf
 
-OTE = (0.62, 0.79)
+# unité de temps -> (interval, period, htf_interval, htf_period)
+TF = {
+    "1m": ("1m", "1d", "15m", "5d"),
+    "5m": ("5m", "5d", "1h", "1mo"),
+    "15m": ("15m", "10d", "1h", "3mo"),
+    "1h": ("1h", "60d", "1d", "1y"),
+}
+ALP = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "1h": "1Hour", "1d": "1Day"}
+DAYS = {"1d": 2, "5d": 7, "10d": 14, "1mo": 31, "3mo": 93, "60d": 60, "1y": 365}
 
-
-def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    pc = df["close"].shift(1)
-    tr = pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()], axis=1).max(axis=1)
-    return tr.rolling(n, min_periods=3).mean()
-
-
-def htf_bias(htf: pd.DataFrame | None) -> int:
-    """+1 haussier, -1 baissier, 0 neutre."""
-    if htf is None or len(htf) < 30:
-        return 0
-    ema = htf["close"].ewm(span=50, adjust=False).mean()
-    up = htf["close"].iloc[-1] > ema.iloc[-1] and ema.iloc[-1] > ema.iloc[-5]
-    dn = htf["close"].iloc[-1] < ema.iloc[-1] and ema.iloc[-1] < ema.iloc[-5]
-    return 1 if up else -1 if dn else 0
-
-
-def _flip(df: pd.DataFrame) -> pd.DataFrame:
-    return pd.DataFrame({"open": -df["open"], "high": -df["low"], "low": -df["high"], "close": -df["close"]}, index=df.index)
-
-
-def _detect_bull(df: pd.DataFrame, n: int = 3, k: float = 1.2) -> list[dict]:
-    o, h, l, c = (df[x].to_numpy(float) for x in ("open", "high", "low", "close"))
-    a = atr(df).to_numpy()
-    N = len(df)
-    swing_highs = [(p, h[p]) for p in range(n, N - n) if h[p] == h[p - n:p + n + 1].max()]
-    out, seen = [], set()
-    for i in range(n + 2, N):
-        ref = a[i - 1]
-        if np.isnan(ref) or not (c[i] > o[i] and c[i] - o[i] >= k * ref):
-            continue
-        j = next((b for b in range(i - 1, max(i - 6, -1), -1) if c[b] < o[b]), None)
-        if j is None or j in seen:
-            continue
-        prev = [p for idx, p in swing_highs if idx + n <= j]
-        if not prev or c[i] <= prev[-1]:
-            continue
-        seen.add(j)
-        ob_bot, ob_top = l[j], h[j]
-        if (c[i + 1:] < ob_bot).any():
-            continue
-        leg_hi = h[j:min(i + 3, N)].max()
-        rng = leg_hi - ob_bot
-        if rng <= 0:
-            continue
-        fvg = None
-        for kk in range(j + 2, min(i + 2, N)):
-            if l[kk] > h[kk - 2] and h[kk - 2] <= ob_top + 0.25 * ref:
-                fvg = (h[kk - 2], l[kk])
-                break
-
-        ote = (leg_hi - OTE[1] * rng, leg_hi - OTE[0] * rng)
-        hit = lambda z: z is not None and z[0] <= ote[1] and z[1] >= ote[0]
-
-        out.append(dict(
-            j=j, i=i, ob=(ob_bot, ob_top), fvg=fvg, ote=ote,
-            ote_hit=hit((ob_bot, ob_top)) or (fvg is not None and hit(fvg)),
-            fresh=not (l[j + 1:i + 1] <= ob_top).any(),
-            disp=(c[i] - o[i]) / ref
-        ))
-    return out
+SYMBOL_ALIASES = {
+    "EURUSD": "EURUSD=X",
+    "EURUSD=X": "EURUSD=X",
+    "XAUUSD": "XAUUSD=X",
+    "XAUUSD=X": "XAUUSD=X",
+    "XAGUSD": "XAGUSD=X",
+    "XAGUSD=X": "XAGUSD=X",
+    "DAX40": "^GDAXI",
+    "DAX": "^GDAXI",
+    "^GDAXI": "^GDAXI",
+    "ETC": "ETC-USD",
+    "EETH": "ETH-USD",
+    "BTC": "BTC-USD",
+    "BTCUSD": "BTC-USD",
+    "ETH": "ETH-USD",
+}
 
 
-def analyze(df: pd.DataFrame, htf: pd.DataFrame | None = None, n: int = 3, k: float = 1.2) -> pd.DataFrame:
-    last = float(df["close"].iloc[-1])
-    bias = htf_bias(htf)
-    rows = []
-    for side, d, s in (("bull", df, 1), ("bear", _flip(df), -1)):
-        m = (lambda z: z) if s == 1 else (lambda z: None if z is None else (-z[1], -z[0]))
-        for z in _detect_bull(d, n, k):
-            ob, fvg, ote = m(z["ob"]), m(z["fvg"]), m(z["ote"])
-            crit = ["OB+BOS"]
-            if fvg: crit.append("FVG")
-            if z["ote_hit"]: crit.append("OTE")
-            if z["fresh"]: crit.append("Fraîche")
-            if bias == s: crit.append("HTF")
-            rows.append(dict(
-                side=side,
-                bottom=ob[0],
-                top=ob[1],
-                fvg=fvg,
-                ote=ote,
-                stars=len(crit),
-                criteres=" · ".join(crit),
-                t0=df.index[z["j"]],
-                t_imp=df.index[z["i"]],
-                dist_pct=round((last - (ob[1] if side == "bull" else ob[0])) / last * 100, 2),
-                in_zone=ob[0] <= last <= ob[1]
-            ))
-    cols = ["side", "bottom", "top", "fvg", "ote", "stars", "criteres", "t0", "t_imp", "dist_pct", "in_zone"]
-    res = pd.DataFrame(rows, columns=cols)
-    return res.sort_values(["stars", "dist_pct"], key=lambda x: x if x.name == "stars" else x.abs(),
-                           ascending=[False, True]).reset_index(drop=True)
+def normalize_symbol(symbol: str) -> str:
+    s = (symbol or "").strip()
+    if not s:
+        return s
+    key = s.upper().replace(" ", "")
+    return SYMBOL_ALIASES.get(key, s)
 
 
-def outcome(df: pd.DataFrame, side: str, bottom: float, top: float, t_imp) -> str:
-    """Résultat d'une zone : pending (jamais touchée), open (touchée, en cours), win (+2R), loss (stop).
-    Entrée au bord de la zone, stop au bord opposé, cible = 2R (R = hauteur de la zone).
-    Si stop et cible sont dans la même bougie, on compte le stop (hypothèse prudente)."""
-    d = df[df.index > t_imp]
-    if side == "bear":
-        lo, hi = -d["high"].to_numpy(float), -d["low"].to_numpy(float)
-        bottom, top = -top, -bottom
-    else:
-        lo, hi = d["low"].to_numpy(float), d["high"].to_numpy(float)
+def _is_stock(s: str) -> bool:
+    s = normalize_symbol(s)
+    return bool(re.fullmatch(r"[A-Za-z]{1,5}(?:\.[A-Za-z0-9]+)?", s)) and not any(ch in s for ch in ("=", "^", "-"))
 
-    r = top - bottom
-    target = top + 2 * r if side == "bull" else bottom - 2 * r
-    touched = False
-    for l, h in zip(lo, hi):
-        if not touched and l <= top:
-            touched = True
-        if touched:
-            if side == "bull":
-                if l <= bottom:
-                    return "loss"
-                if h >= target:
-                    return "win"
-            else:
-                if h >= top:
-                    return "loss"
-                if l <= target:
-                    return "win"
-    return "open" if touched else "pending"
+
+def _alpaca(symbol: str, interval: str, period: str) -> pd.DataFrame:
+    start = (datetime.now(timezone.utc) - timedelta(days=DAYS[period])).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r = requests.get(
+        f"https://data.alpaca.markets/v2/stocks/{symbol}/bars",
+        headers={"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]},
+        params={"timeframe": ALP[interval], "start": start, "limit": 800, "sort": "desc",
+                "feed": os.getenv("ALPACA_FEED", "iex"), "adjustment": "raw"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    bars = r.json().get("bars") or []
+    if not bars:
+        raise ValueError("Alpaca : aucune barre")
+    df = pd.DataFrame(bars).rename(columns={"t": "time", "o": "open", "h": "high", "l": "low", "c": "close"})
+    df["time"] = pd.to_datetime(df["time"])
+    df = df.set_index("time")[["open", "high", "low", "close"]].sort_index()
+    if df.index.tz is None:
+        df = df.tz_localize("UTC")
+    return df.tz_convert("Europe/Paris")
+
+
+def _yf(symbol: str, interval: str, period: str) -> pd.DataFrame:
+    df = yf.download(symbol, interval=interval, period=period, progress=False, auto_adjust=True)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df.rename(columns=str.lower)[["open", "high", "low", "close"]].dropna()
+
+
+def get_bars(symbol: str, interval: str, period: str):
+    """Retourne (DataFrame, source)."""
+    sym = normalize_symbol(symbol)
+    if os.getenv("ALPACA_KEY") and os.getenv("ALPACA_SECRET") and _is_stock(sym):
+        try:
+            return _alpaca(sym, interval, period), "alpaca"
+        except Exception as e:
+            print(f"{sym}: Alpaca KO ({e}), repli yfinance")
+    return _yf(sym, interval, period), "yfinance"
+
+
+def get_pair(symbol: str, tf: str):
+    i, p, hi, hp = TF[tf]
+    df, src = get_bars(symbol, i, p)
+    htf, _ = get_bars(symbol, hi, hp)
+    return df, htf, src

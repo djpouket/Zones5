@@ -1,26 +1,70 @@
-import numpy as np, pandas as pd
-from zones import analyze
+"""Scanner headless (lancé toutes les 5 min par GitHub Actions) :
+détecte les zones, les enregistre dans Supabase, envoie les alertes Telegram, met à jour les résultats."""
+import os
 
-def build(flip=False):
-    rows = []
-    for t in range(25):
-        o = 100 + 0.3 * np.sin(t); c = o + (0.2 if t % 2 else -0.2)
-        rows.append([o, max(o, c) + .4, min(o, c) - .4, c])
-    rows[15][1] = 102.5
-    rows += [[101.2, 101.4, 100.4, 100.6], [100.7, 104.1, 100.65, 104], [104, 105, 102.5, 104.6], [104.6, 105.5, 104.2, 105.2]]
-    rows += [[105, 105.4, 104, 105.1]] * 6
-    a = np.array(rows)
-    if flip:
-        a = 200 - a[:, [0, 2, 1, 3]]
-    idx = pd.date_range("2026-01-05 09:00", periods=len(a), freq="5min")
-    return pd.DataFrame(a, columns=["open", "high", "low", "close"], index=idx)
+import pandas as pd
 
-def htf(up=True):
-    c = np.linspace(80, 105, 80) if up else np.linspace(120, 95, 80)
-    return pd.DataFrame({"open": c, "high": c + 1, "low": c - 1, "close": c})
+import notify
+import store
+from data import get_pair, normalize_symbol
+from zones import analyze, outcome
 
-r = analyze(build(), htf(True)); print(r[["side", "bottom", "top", "stars", "criteres"]])
-assert r.iloc[0].stars == 5 and r.iloc[0].side == "bull"
-r = analyze(build(True), htf(False)); print(r[["side", "bottom", "top", "stars", "criteres"]])
-assert r.iloc[0].stars == 5 and r.iloc[0].side == "bear"
-print("OK")
+DEFAULT_SYMBOLS = "EURUSD,XAUUSD,XAGUSD,DAX40,ETC"
+SYMBOLS = [normalize_symbol(s) for s in os.getenv("SYMBOLS", DEFAULT_SYMBOLS).split(",") if s.strip()]
+TF = os.getenv("TF", "5m")
+ALERT_MIN = int(os.getenv("ALERT_MIN", "5"))
+STORE_MIN = int(os.getenv("STORE_MIN", "3"))
+
+
+def fmt(title, sym, r, last):
+    e = "🟢" if r.side == "bull" else "🔴"
+    sens = "HAUSSIER" if r.side == "bull" else "BAISSIER"
+    return f"{e} {title} — {sym} {r.stars}★ {sens} ({TF})\nZone {r.bottom:.4f} – {r.top:.4f}\nPrix {last:.4f}\n{r.criteres}"
+
+
+def main():
+    if not store.enabled():
+        print("Supabase non configuré : scan annulé (pas de dédoublonnage possible).")
+        return
+    frames = {}
+    for sym in SYMBOLS:
+        try:
+            df, htf, src = get_pair(sym, TF)
+            frames[sym] = df
+            last = float(df["close"].iloc[-1])
+            z = analyze(df, htf)
+            z = z[z.stars >= STORE_MIN]
+            print(f"{sym} [{src}] : {len(z)} zone(s) >= {STORE_MIN}★")
+            if z.empty:
+                continue
+            z = z.assign(id=[f"{sym}|{TF}|{r.side}|{r.t0.isoformat()}" for r in z.itertuples()])
+            new = z[~z.id.isin(store.existing_ids(list(z.id)))]
+            if len(new):
+                store.insert_zones([dict(id=r.id, symbol=sym, tf=TF, side=r.side, stars=int(r.stars),
+                                         bottom=float(r.bottom), top=float(r.top), criteres=r.criteres,
+                                         t0=r.t0.isoformat(), t_imp=r.t_imp.isoformat()) for r in new.itertuples()])
+            for r in new[new.stars >= ALERT_MIN].itertuples():
+                notify.send(fmt("Nouvelle zone", sym, r, last))
+            hot = z[(z.stars >= ALERT_MIN) & z.in_zone]
+            if len(hot):
+                todo = store.not_entry_alerted(list(hot.id))
+                for r in hot[hot.id.isin(todo)].itertuples():
+                    notify.send(fmt("Prix dans la zone", sym, r, last))
+                    store.patch(r.id, entry_alerted=True)
+        except Exception as e:
+            print(f"{sym}: erreur {e}")
+
+    for z in store.open_zones():
+        df = frames.get(z["symbol"])
+        if df is None or z["tf"] != TF:
+            continue
+        t_imp = pd.Timestamp(z["t_imp"])
+        out = outcome(df, z["side"], z["bottom"], z["top"], t_imp)
+        if out in ("pending", "open") and t_imp < df.index[0]:
+            out = "expired"
+        if out != z["outcome"]:
+            store.patch(z["id"], outcome=out)
+
+
+if __name__ == "__main__":
+    main()

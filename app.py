@@ -1,96 +1,140 @@
+"""Moteur SMC : Order Blocks + Imbalance (FVG) + OTE -> note de 1 à 5 étoiles.
+
+Critères (1 point chacun) :
+  1. OB valide : bougie opposée avant un déplacement fort (>= k*ATR) qui casse la structure (BOS)
+  2. Imbalance : un FVG créé par l'impulsion, collé à l'OB
+  3. OTE : l'OB ou le FVG chevauche la zone 62%-79% de la jambe d'impulsion
+  4. Fraîche : prix jamais revenu toucher l'OB depuis sa formation (et non invalidée)
+  5. Biais HTF aligné (EMA50 + pente sur la unité de temps supérieure)
+"""
+import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
 
-import store
-from data import TF, get_pair
-from zones import analyze
-
-st.set_page_config(page_title="Zones 5★ SMC", layout="wide")
-st.title("Zones SMC — OB · Imbalance · OTE")
-
-DEFAULT_SYMBOLS = "EURUSD=X,XAUUSD=X,XAGUSD=X,^GDAXI,^STOXX50E,GBPUSD=X,USDJPY=X,USDCHF=X,AUDUSD=X,NZDUSD=X"
-
-with st.sidebar:
-    symbols = [s.strip() for s in st.text_input("Symboles (forex, indices, commodités)", DEFAULT_SYMBOLS).split(",") if s.strip()]
-    tf = st.selectbox("Unité de temps", list(TF), index=1)
-    min_stars = st.slider("Étoiles minimum", 1, 5, 5)
-    refresh = st.slider("Rafraîchissement (s)", 15, 120, 30)
+OTE = (0.62, 0.79)
 
 
-@st.cache_data(ttl=15, show_spinner=False)
-def load(sym, tf):
-    df, htf, src = get_pair(sym, tf)
-    return df, htf, analyze(df, htf), src
+def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    pc = df["close"].shift(1)
+    tr = pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()], axis=1).max(axis=1)
+    return tr.rolling(n, min_periods=3).mean()
 
 
-def draw(sym, df, zones):
-    d = df.tail(150)
-    fig = go.Figure(go.Candlestick(x=d.index, open=d.open, high=d.high, low=d.low, close=d.close, name=sym))
-    for _, z in zones[zones.t0 >= d.index[0]].iterrows():
-        col = "0,160,90" if z.side == "bull" else "210,50,50"
-        bottom, top = min(z.bottom, z.top), max(z.bottom, z.top)
-        fig.add_shape(type="rect", x0=z.t0, x1=d.index[-1], y0=bottom, y1=top,
-                      fillcolor=f"rgba({col},0.25)", line=dict(color=f"rgb({col})", width=1))
-        if z.fvg:
-            fvg_bottom, fvg_top = min(z.fvg), max(z.fvg)
-            fig.add_shape(type="rect", x0=z.t0, x1=d.index[-1], y0=fvg_bottom, y1=fvg_top,
-                          fillcolor="rgba(120,120,255,0.18)", line_width=0)
-        for y in z.ote:
-            fig.add_shape(type="line", x0=z.t0, x1=d.index[-1], y0=y, y1=y, line=dict(color="gold", dash="dot", width=1))
-        fig.add_annotation(x=z.t0, y=top, text="★" * z.stars, showarrow=False, yshift=10)
-    fig.update_layout(xaxis_rangeslider_visible=False, height=520, margin=dict(l=0, r=0, t=10, b=0))
-    st.plotly_chart(fig, use_container_width=True)
+def htf_bias(htf: pd.DataFrame | None) -> int:
+    """+1 haussier, -1 baissier, 0 neutre."""
+    if htf is None or len(htf) < 30:
+        return 0
+    ema = htf["close"].ewm(span=50, adjust=False).mean()
+    up = htf["close"].iloc[-1] > ema.iloc[-1] and ema.iloc[-1] > ema.iloc[-5]
+    dn = htf["close"].iloc[-1] < ema.iloc[-1] and ema.iloc[-1] < ema.iloc[-5]
+    return 1 if up else -1 if dn else 0
 
 
-@st.fragment(run_every=f"{refresh}s")
-def live():
-    frames, tables = {}, []
-    for s in symbols:
-        try:
-            df, _, z, src = load(s, tf)
-        except Exception as e:
-            st.warning(f"{s}: {e}")
+def _flip(df: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame({"open": -df["open"], "high": -df["low"], "low": -df["high"], "close": -df["close"]}, index=df.index)
+
+
+def _detect_bull(df: pd.DataFrame, n: int = 3, k: float = 1.5) -> list[dict]:
+    o, h, l, c = (df[x].to_numpy(float) for x in ("open", "high", "low", "close"))
+    a = atr(df).to_numpy()
+    N = len(df)
+    swing_highs = [(p, h[p]) for p in range(n, N - n) if h[p] == h[p - n:p + n + 1].max()]
+    out, seen = [], set()
+    for i in range(n + 2, N):
+        ref = a[i - 1]
+        if np.isnan(ref) or not (c[i] > o[i] and c[i] - o[i] >= k * ref):
             continue
-        frames[s] = (df, z, src)
-        z = z[z.stars >= min_stars]
-        if len(z):
-            tables.append(z.assign(symbole=s, prix=round(float(df.close.iloc[-1]), 4)))
-    st.caption(f"Mis à jour {pd.Timestamp.now():%H:%M:%S} — {len(tables)} symbole(s) avec zone ≥ {min_stars}★")
-    if tables:
-        t = pd.concat(tables)[["symbole", "side", "stars", "bottom", "top", "prix", "dist_pct", "in_zone", "criteres"]]
-        st.dataframe(t.sort_values(["stars", "in_zone"], ascending=False), use_container_width=True, hide_index=True)
-    sel = st.selectbox("Graphique", list(frames))
-    if sel:
-        df, z, src = frames[sel]
-        st.caption(f"Source des données : {src}")
-        draw(sel, df, z[z.stars >= max(1, min_stars - 1)])
+        j = next((b for b in range(i - 1, max(i - 6, -1), -1) if c[b] < o[b]), None)
+        if j is None or j in seen:
+            continue
+        prev = [p for idx, p in swing_highs if idx + n <= j]
+        if not prev or c[i] <= prev[-1]:
+            continue
+        seen.add(j)
+        ob_bot, ob_top = l[j], h[j]
+        if (c[i + 1:] < ob_bot).any():
+            continue
+        leg_hi = h[j:min(i + 3, N)].max()
+        rng = leg_hi - ob_bot
+        if rng <= 0:
+            continue
+        if (c[i] - o[i]) / ref < 1.5:
+            continue
+        fvg = None
+        for kk in range(j + 2, min(i + 2, N)):
+            if l[kk] > h[kk - 2] and h[kk - 2] <= ob_top + 0.25 * ref:
+                fvg = (h[kk - 2], l[kk])
+                break
+        if fvg is None:
+            continue
+        ote = (leg_hi - OTE[1] * rng, leg_hi - OTE[0] * rng)
+        hit = lambda z: z is not None and z[0] <= ote[1] and z[1] >= ote[0]
+        out.append(dict(
+            j=j, i=i, ob=(ob_bot, ob_top), fvg=fvg, ote=ote,
+            ote_hit=hit((ob_bot, ob_top)) or hit(fvg),
+            fresh=not (l[j + 1:i + 1] <= ob_top).any(),
+            disp=(c[i] - o[i]) / ref
+        ))
+    return out
 
 
-def stats():
-    if not store.enabled():
-        st.info("Supabase non configuré (secrets SUPABASE_URL et SUPABASE_KEY).")
-        return
-    d = pd.DataFrame(store.all_zones())
-    if d.empty:
-        st.info("Aucune zone enregistrée pour l'instant : le scanner GitHub Actions doit tourner quelques heures.")
-        return
-    g = d.groupby("stars").agg(
-        zones=("id", "count"),
-        gagnants=("outcome", lambda s: int((s == "win").sum())),
-        perdants=("outcome", lambda s: int((s == "loss").sum())),
-        en_cours=("outcome", lambda s: int(s.isin(["pending", "open"]).sum())),
-    )
-    done = g.gagnants + g.perdants
-    g["taux_%"] = (100 * g.gagnants / done.where(done > 0)).round(1)
-    st.dataframe(g, use_container_width=True)
-    st.bar_chart(g["taux_%"])
-    st.caption("Gagnant = le prix touche la zone puis atteint +2R (R = hauteur de la zone) avant de casser son bord opposé. "
-               "Seuil de rentabilité : 33 % (hors frais). Peu de zones résolues = chiffres peu fiables.")
+def analyze(df: pd.DataFrame, htf: pd.DataFrame | None = None, n: int = 3, k: float = 1.5) -> pd.DataFrame:
+    last = float(df["close"].iloc[-1])
+    bias = htf_bias(htf)
+    rows = []
+    for side, d, s in (("bull", df, 1), ("bear", _flip(df), -1)):
+        m = (lambda z: z) if s == 1 else (lambda z: None if z is None else (-z[1], -z[0]))
+        for z in _detect_bull(d, n, k):
+            ob, fvg, ote = m(z["ob"]), m(z["fvg"]), m(z["ote"])
+            crit = ["OB+BOS"]
+            if fvg: crit.append("FVG")
+            if z["ote_hit"]: crit.append("OTE")
+            if z["fresh"]: crit.append("Fraîche")
+            if bias == s: crit.append("HTF")
+            rows.append(dict(
+                side=side,
+                bottom=ob[0],
+                top=ob[1],
+                fvg=fvg,
+                ote=ote,
+                stars=len(crit),
+                criteres=" · ".join(crit),
+                t0=df.index[z["j"]],
+                t_imp=df.index[z["i"]],
+                dist_pct=round((last - (ob[1] if side == "bull" else ob[0])) / last * 100, 2),
+                in_zone=ob[0] <= last <= ob[1]
+            ))
+    cols = ["side", "bottom", "top", "fvg", "ote", "stars", "criteres", "t0", "t_imp", "dist_pct", "in_zone"]
+    res = pd.DataFrame(rows, columns=cols)
+    return res.sort_values(["stars", "dist_pct"], key=lambda x: x if x.name == "stars" else x.abs(),
+                           ascending=[False, True]).reset_index(drop=True)
 
 
-tab_live, tab_stats = st.tabs(["Live", "Stats"])
-with tab_live:
-    live()
-with tab_stats:
-    stats()
+def outcome(df: pd.DataFrame, side: str, bottom: float, top: float, t_imp) -> str:
+    """Résultat d'une zone : pending (jamais touchée), open (touchée, en cours), win (+2R), loss (stop).
+    Entrée au bord de la zone, stop au bord opposé, cible = 2R (R = hauteur de la zone).
+    Si stop et cible sont dans la même bougie, on compte le stop (hypothèse prudente)."""
+    d = df[df.index > t_imp]
+    if side == "bear":
+        lo, hi = -d["high"].to_numpy(float), -d["low"].to_numpy(float)
+        bottom, top = -top, -bottom
+    else:
+        lo, hi = d["low"].to_numpy(float), d["high"].to_numpy(float)
+
+    r = top - bottom
+    target = top + 2 * r if side == "bull" else bottom - 2 * r
+    touched = False
+    for l, h in zip(lo, hi):
+        if not touched and l <= top:
+            touched = True
+        if touched:
+            if side == "bull":
+                if l <= bottom:
+                    return "loss"
+                if h >= target:
+                    return "win"
+            else:
+                if h >= top:
+                    return "loss"
+                if l <= target:
+                    return "win"
+    return "open" if touched else "pending"

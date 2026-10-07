@@ -7,7 +7,6 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-# unité de temps -> (interval, period, htf_interval, htf_period)
 TF = {
     "1m": ("1m", "1d", "15m", "5d"),
     "5m": ("5m", "5d", "1h", "1mo"),
@@ -30,10 +29,11 @@ SYMBOL_ALIASES = {
     "ETC": "ETC-USD",
     "ETCUSD": "ETC-USD",
     "ETC-USD": "ETC-USD",
-    "ETH": "ETH-USD",
-    "ETHUSD": "ETH-USD",
     "BTC": "BTC-USD",
     "BTCUSD": "BTC-USD",
+    "BTC-USD": "BTC-USD",
+    "ETH": "ETH-USD",
+    "ETHUSD": "ETH-USD",
     "USDCHF": "USDCHF=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
@@ -80,11 +80,13 @@ def _yf(symbol: str, interval: str, period: str) -> pd.DataFrame:
     df = yf.download(symbol, interval=interval, period=period, progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    return df.rename(columns=str.lower)[["open", "high", "low", "close"]].dropna()
+    out = df.rename(columns=str.lower)[["open", "high", "low", "close"]].dropna()
+    if out.empty:
+        raise ValueError(f"Aucune donnée pour {symbol}")
+    return out
 
 
 def get_bars(symbol: str, interval: str, period: str):
-    """Retourne (DataFrame, source)."""
     sym = normalize_symbol(symbol)
     if os.getenv("ALPACA_KEY") and os.getenv("ALPACA_SECRET") and _is_stock(sym):
         try:
@@ -99,3 +101,4 @@ def get_pair(symbol: str, tf: str):
     df, src = get_bars(symbol, i, p)
     htf, _ = get_bars(symbol, hi, hp)
     return df, htf, src
+

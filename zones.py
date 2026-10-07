@@ -28,10 +28,17 @@ SYMBOL_ALIASES = {
     "DAX": "^GDAXI",
     "^GDAXI": "^GDAXI",
     "ETC": "ETC-USD",
-    "EETH": "ETH-USD",
+    "ETCUSD": "ETC-USD",
+    "ETC-USD": "ETC-USD",
+    "ETH": "ETH-USD",
+    "ETHUSD": "ETH-USD",
     "BTC": "BTC-USD",
     "BTCUSD": "BTC-USD",
-    "ETH": "ETH-USD",
+    "USDCHF": "USDCHF=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "USDJPY=X",
+    "AUDUSD": "AUDUSD=X",
+    "NZDUSD": "NZDUSD=X",
 }
 
 
